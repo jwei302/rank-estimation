@@ -1,0 +1,8 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/jwei302/Projects/rank-estimation/code/build/cmake_install.cmake",
+		"/Users/jwei302/Projects/rank-estimation/code/build/_deps/nlohmann_json-build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

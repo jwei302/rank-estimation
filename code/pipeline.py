@@ -10,6 +10,8 @@ import signal
 import sys
 from datetime import datetime, timedelta
 import os
+import multiprocessing as mp
+from functools import partial
 
 
 def get_I_a_list(N):
@@ -299,6 +301,109 @@ def optimized_implementation_3(I_list, a_list, psi, chunk_size=1000, verbose=Tru
     return J1, J2
 
 
+def process_chunk_multiprocessing(chunk_data):
+    """Process a chunk of valid combinations in a separate process"""
+    valid_combinations_chunk, valid_combinations_all, I_list, a_list, psi = chunk_data
+    
+    # Local results for this chunk
+    J1_data = []
+    J1_indices = []
+    J2_data = []
+    J2_indices = []
+    
+    # Process this chunk against ALL valid combinations
+    for i, a_idx, Jp in valid_combinations_chunk:
+        for ip, ap_idx, Jpp in valid_combinations_all:
+            if Jp == Jpp:
+                a = a_list[a_idx]
+                ap = a_list[ap_idx]
+                I = I_list[i]
+                Ip = I_list[ip]
+                
+                s1 = levi_civita_sign_optimized(a, I)
+                s2 = levi_civita_sign_optimized(ap, Ip)
+                
+                J1_data.append(s1 * s2 * psi[ap_idx])
+                J1_indices.append((i, ip, a_idx))
+                
+                J2_data.append(s1 * s2 * psi[a_idx])
+                J2_indices.append((i, ip, ap_idx))
+    
+    return J1_data, J1_indices, J2_data, J2_indices
+
+
+def multiprocessing_implementation(I_list, a_list, psi, num_processes=None, verbose=True):
+    """
+    Multiprocessing implementation - parallelizes the valid combinations processing
+    """
+    if num_processes is None:
+        num_processes = min(mp.cpu_count(), 8)  # Limit to 8 to avoid overwhelming the system
+    
+    num_I = len(I_list)
+    num_a = len(a_list)
+    
+    if verbose:
+        print(f"Using {num_processes} processes for multiprocessing implementation")
+    
+    start_time = time.time()
+    
+    # Precompute all valid combinations (same as opt2)
+    valid_combinations = []
+    for i, I in enumerate(I_list):
+        for a_idx, a in enumerate(a_list):
+            if set(I).issubset(set(a)):
+                Jp = tuple(sorted(set(a) - set(I)))
+                valid_combinations.append((i, a_idx, Jp))
+    
+    if verbose:
+        print(f"Found {len(valid_combinations)} valid combinations")
+        print(f"Expected total operations: {len(valid_combinations)**2:,}")
+    
+    # Split valid combinations into chunks for multiprocessing
+    chunk_size = max(1, len(valid_combinations) // num_processes)
+    chunks = [valid_combinations[i:i + chunk_size] 
+              for i in range(0, len(valid_combinations), chunk_size)]
+    
+    if verbose:
+        print(f"Split into {len(chunks)} chunks of ~{chunk_size} combinations each")
+    
+    # Prepare data for each process
+    chunk_data = [(chunk, valid_combinations, I_list, a_list, psi) for chunk in chunks]
+    
+    # Process chunks in parallel
+    with mp.Pool(num_processes) as pool:
+        results = pool.map(process_chunk_multiprocessing, chunk_data)
+    
+    # Combine results from all processes
+    J1_data_all = []
+    J1_indices_all = []
+    J2_data_all = []
+    J2_indices_all = []
+    
+    for J1_data, J1_indices, J2_data, J2_indices in results:
+        J1_data_all.extend(J1_data)
+        J1_indices_all.extend(J1_indices)
+        J2_data_all.extend(J2_data)
+        J2_indices_all.extend(J2_indices)
+    
+    # Convert to dense tensors
+    J1 = torch.zeros((num_I, num_I, num_a))
+    J2 = torch.zeros((num_I, num_I, num_a))
+    
+    for (i, ip, a_idx), val in zip(J1_indices_all, J1_data_all):
+        J1[i, ip, a_idx] = val
+    
+    for (i, ip, ap_idx), val in zip(J2_indices_all, J2_data_all):
+        J2[i, ip, ap_idx] = val
+    
+    end_time = time.time()
+    if verbose:
+        print(f"\nMultiprocessing implementation time: {end_time - start_time:.4f} seconds")
+        print(f"Computed {len(J1_data_all)} non-zero elements")
+    
+    return J1, J2
+
+
 def plot_spectrum(S, threshold=1e-5, title="Spectrum of Jacobian Matrix", 
                  N=None, psi_state_name=None, implementation=None):
     """
@@ -386,7 +491,7 @@ def run_pipeline(N=8, psi_state_func=psi_random, implementation='opt2'):
     Args:
         N: System size
         psi_state_func: Function to generate psi state
-        implementation: 'opt2' or 'opt3'
+        implementation: 'opt2', 'opt3', or 'multiprocessing'
         
     Returns:
         dict with results: rank, singular_values, J_matrix, timing
@@ -412,8 +517,10 @@ def run_pipeline(N=8, psi_state_func=psi_random, implementation='opt2'):
         J1, J2 = optimized_implementation_2(I_list, a_list, psi, verbose=True)
     elif implementation == 'opt3':
         J1, J2 = optimized_implementation_3(I_list, a_list, psi, verbose=True)
+    elif implementation == 'multiprocessing':
+        J1, J2 = multiprocessing_implementation(I_list, a_list, psi, verbose=True)
     else:
-        raise ValueError(f"Unknown implementation: {implementation}")
+        raise ValueError(f"Unknown implementation: {implementation}. Available: 'opt2', 'opt3', 'multiprocessing'")
     
     # Compute Jacobian matrix
     print("Computing Jacobian matrix...")
@@ -472,7 +579,7 @@ def main():
                         choices=['product', 'random'],
                         help='Psi state function (default: random)')
     parser.add_argument('--impl', type=str, default='opt2', 
-                        choices=['opt2', 'opt3'],
+                        choices=['opt2', 'opt3', 'multiprocessing'],
                         help='Implementation to use (default: opt2)')
     
     args = parser.parse_args()
